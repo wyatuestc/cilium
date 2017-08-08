@@ -25,9 +25,14 @@ import (
 	"github.com/cilium/cilium/common"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/k8s"
+	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/spf13/cobra"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/yaml"
+	"k8s.io/client-go/pkg/api/v1"
+	"k8s.io/client-go/pkg/apis/extensions/v1beta1"
+	"os"
 )
 
 const (
@@ -36,15 +41,15 @@ const (
 
 var src, dst, dports []string
 var srcIdentity, dstIdentity int64
-var srcEndpoint, dstEndpoint, srcK8sPod, dstK8sPod string
+var srcEndpoint, dstEndpoint, srcK8sPod, dstK8sPod, srcK8sYaml, dstK8sYaml string
 var verbose bool
 
 // policyTraceCmd represents the policy_trace command
 var policyTraceCmd = &cobra.Command{
-	Use:   "trace ( -s <label context> | --src-identity <security identity> | --src-endpoint <endpoint ID> | --src-k8s-pod <namespace:pod-name> ) ( -d <label context> | --dst-identity <security identity> | --dst-endpoint <endpoint ID> | --dst-k8s-pod <namespace:pod-name> ) [--dport <port>[/<protocol>]",
+	Use:   "trace ( -s <label context> | --src-identity <security identity> | --src-endpoint <endpoint ID> | --src-k8s-pod <namespace:pod-name> | --src-k8s-yaml <path to YAML file> ) ( -d <label context> | --dst-identity <security identity> | --dst-endpoint <endpoint ID> | --dst-k8s-pod <namespace:pod-name> | --dst-k8s-yaml <path to YAML file>) [--dport <port>[/<protocol>]",
 	Short: "Trace a policy decision",
-	Long: `Verifies if source ID or LABEL(s) is allowed to consume
-destination ID or LABEL(s). LABEL is represented as
+	Long: `Verifies if the source is allowed to consume
+destination. Source / destination can be provided as endpoint ID, security ID, Kubernetes Pod, set of LABELs. LABEL is represented as
 SOURCE:KEY[=VALUE].
 dports can be can be for example: 80/tcp, 53 or 23/udp.`,
 	Run: func(cmd *cobra.Command, args []string) {
@@ -53,11 +58,11 @@ dports can be can be for example: 80/tcp, 53 or 23/udp.`,
 		var dPorts []*models.Port
 		var err error
 
-		if len(src) == 0 && srcIdentity == defaultSecurityID && srcEndpoint == "" && srcK8sPod == "" {
+		if len(src) == 0 && srcIdentity == defaultSecurityID && srcEndpoint == "" && srcK8sPod == "" && srcK8sYaml == "" {
 			Usagef(cmd, "Missing source argument")
 		}
 
-		if len(dst) == 0 && dstIdentity == defaultSecurityID && dstEndpoint == "" && dstK8sPod == "" {
+		if len(dst) == 0 && dstIdentity == defaultSecurityID && dstEndpoint == "" && dstK8sPod == "" && dstK8sYaml == "" {
 			Usagef(cmd, "Missing destination argument")
 		}
 
@@ -115,6 +120,16 @@ dports can be can be for example: 80/tcp, 53 or 23/udp.`,
 			dstSlice = appendIdentityLabelsToSlice(id, dstSlice)
 		}
 
+		if srcK8sYaml != "" {
+			srcYamlLabels := getLabelsFromYaml(srcK8sYaml)
+			srcSlice = append(srcSlice, srcYamlLabels...)
+		}
+
+		if dstK8sYaml != "" {
+			dstYamlLabels := getLabelsFromYaml(dstK8sYaml)
+			dstSlice = append(dstSlice, dstYamlLabels...)
+		}
+
 		search := models.IdentityContext{
 			From:    srcSlice,
 			To:      dstSlice,
@@ -132,6 +147,112 @@ dports can be can be for example: 80/tcp, 53 or 23/udp.`,
 	},
 }
 
+func getLabelsFromYaml(file string) []string {
+	reader, err := os.Open(file)
+	defer reader.Close()
+	if err != nil {
+		Fatalf("%s", err)
+	}
+	yamlDecoder := yaml.NewYAMLToJSONDecoder(reader)
+
+	var yamlData interface{}
+	err = yamlDecoder.Decode(&yamlData)
+	if err != nil {
+		Fatalf("error decoding file %s: %s", file, err)
+	}
+
+	m := yamlData.(map[string]interface{})
+	lbls := parseYaml(file, m)
+	fmt.Printf("labels: %v\n", lbls)
+	return lbls
+}
+
+func parseYaml(fileName string, yamlData map[string]interface{}) []string {
+	lbls := []string{}
+	if v, ok := yamlData["kind"]; ok {
+		vStr := v.(string)
+		switch vStr {
+		case "Deployment":
+			var deployment v1beta1.Deployment
+			reader, err := os.Open(fileName)
+			defer reader.Close()
+			if err != nil {
+				Fatalf("%s", err)
+			}
+			yamlDecoder := yaml.NewYAMLToJSONDecoder(reader)
+			err = yamlDecoder.Decode(&deployment)
+			if err != nil {
+				fmt.Printf("error: %s", err)
+			}
+
+			var ns string
+			if deployment.Namespace != "" {
+				ns = deployment.Namespace
+			} else {
+				ns = "default"
+			}
+			lbls = append(lbls, fmt.Sprintf("%v:io.kubernetes.pod.namespace=%v", labels.LabelSourceK8s, ns))
+
+			for k, v := range deployment.Spec.Template.Labels {
+				lbls = append(lbls, fmt.Sprintf("%v:%v=%v", labels.LabelSourceK8s, k, v))
+			}
+		case "ReplicationController":
+			var controller v1.ReplicationController
+			reader, err := os.Open(fileName)
+			defer reader.Close()
+			if err != nil {
+				Fatalf("%s", err)
+			}
+			yamlDecoder := yaml.NewYAMLToJSONDecoder(reader)
+			err = yamlDecoder.Decode(&controller)
+			if err != nil {
+				Fatalf("error: %s", err)
+			}
+
+			var ns string
+			if controller.Namespace != "" {
+				ns = controller.Namespace
+			} else {
+				ns = "default"
+			}
+			lbls = append(lbls, fmt.Sprintf("%v:io.kubernetes.pod.namespace=%v", labels.LabelSourceK8s, ns))
+
+			for k, v := range controller.Spec.Template.Labels {
+				lbls = append(lbls, fmt.Sprintf("%v:%v=%v", labels.LabelSourceK8s, k, v))
+			}
+		case "ReplicaSet":
+			var rep v1beta1.ReplicaSet
+			reader, err := os.Open(fileName)
+			defer reader.Close()
+			if err != nil {
+				Fatalf("%s", err)
+			}
+			yamlDecoder := yaml.NewYAMLToJSONDecoder(reader)
+			err = yamlDecoder.Decode(&rep)
+			if err != nil {
+				Fatalf("error: %s", err)
+			}
+
+			var ns string
+			if rep.Namespace != "" {
+				ns = rep.Namespace
+			} else {
+				ns = "default"
+			}
+			lbls = append(lbls, fmt.Sprintf("%v:io.kubernetes.pod.namespace=%v", labels.LabelSourceK8s, ns))
+
+			for k, v := range rep.Spec.Template.Labels {
+				lbls = append(lbls, fmt.Sprintf("%v:%v=%v", labels.LabelSourceK8s, k, v))
+			}
+		default:
+			Fatalf("please provide a YAML of a Deployment, ReplicationController, or ReplicaSet")
+		}
+	} else {
+		Fatalf("Improperly formatted YAML provided")
+	}
+	return lbls
+}
+
 func init() {
 	policyCmd.AddCommand(policyTraceCmd)
 	policyTraceCmd.Flags().StringSliceVarP(&src, "src", "s", []string{}, "Source label context")
@@ -144,6 +265,8 @@ func init() {
 	policyTraceCmd.Flags().StringVarP(&dstEndpoint, "dst-endpoint", "", "", "Destination endpoint")
 	policyTraceCmd.Flags().StringVarP(&srcK8sPod, "src-k8s-pod", "", "", "Source k8s pod ([namespace:]podname)")
 	policyTraceCmd.Flags().StringVarP(&dstK8sPod, "dst-k8s-pod", "", "", "Destination k8s pod ([namespace:]podname)")
+	policyTraceCmd.Flags().StringVarP(&srcK8sYaml, "src-k8s-yaml", "", "", "Path to YAML file for source")
+	policyTraceCmd.Flags().StringVarP(&dstK8sYaml, "dst-k8s-yaml", "", "", "Path to YAML file for destination")
 }
 
 func appendIdentityLabelsToSlice(secID string, labelSlice []string) []string {
