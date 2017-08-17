@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 
+	log "github.com/Sirupsen/logrus"
 	"github.com/cilium/cilium/api/v1/models"
 )
 
@@ -45,6 +46,10 @@ type ServiceID uint16
 type LBBackEnd struct {
 	L3n4Addr
 	Weight uint16
+}
+
+func (lbbe *LBBackEnd) String() string {
+	return fmt.Sprintf("%s, weight: %d", lbbe.L3n4Addr.String(), lbbe.Weight)
 }
 
 // LBSVC is essentially used for the REST API.
@@ -101,15 +106,20 @@ type LoadBalancer struct {
 func (lb *LoadBalancer) AddService(svc LBSVC) bool {
 	oldSvc, ok := lb.SVCMapID[svc.FE.ID]
 	if ok {
-		// If service already existed, remove old entry from map
+		// If service already existed, remove old entry from Cilium's map
+		log.Debugf("service %d is already in lb.SVCMapID; deleting old entry and updating it with new entry", svc.FE.ID)
 		delete(lb.SVCMap, oldSvc.Sha256)
 	}
+	log.Debugf("adding service %d with SHA %d to lb.SVCMap", svc.FE.ID, svc.Sha256)
 	lb.SVCMap[svc.Sha256] = svc
+	log.Debugf("adding service %d to lb.SVCMapID", svc.FE.ID)
 	lb.SVCMapID[svc.FE.ID] = &svc
 	return !ok
 }
 
+// DeleteService deletes svc from lb's SVCMap and SVCMapID.
 func (lb *LoadBalancer) DeleteService(svc *LBSVC) {
+	log.Debugf("deleting service %d from lb.SVCMap, lb.SVCMapID", svc.FE.ID)
 	delete(lb.SVCMap, svc.Sha256)
 	delete(lb.SVCMapID, svc.FE.ID)
 }
@@ -225,7 +235,11 @@ func NewL3n4Addr(protocol L4Type, ip net.IP, portNumber uint16) (*L3n4Addr, erro
 	if err != nil {
 		return nil, err
 	}
-	return &L3n4Addr{IP: ip, L4Addr: *lbport}, nil
+
+	addr := L3n4Addr{IP: ip, L4Addr: *lbport}
+	log.Debugf("created new L3n4Addr %s", addr)
+
+	return &addr, nil
 }
 
 func NewL3n4AddrFromModel(base *models.FrontendAddress) (*L3n4Addr, error) {
@@ -260,10 +274,14 @@ func NewLBBackEnd(protocol L4Type, ip net.IP, portNumber uint16, weight uint16) 
 	if err != nil {
 		return nil, err
 	}
-	return &LBBackEnd{
+
+	lbbe := LBBackEnd{
 		L3n4Addr: L3n4Addr{IP: ip, L4Addr: *lbport},
 		Weight:   weight,
-	}, nil
+	}
+	log.Debugf("created new LBBackend %s", lbbe)
+
+	return &lbbe, nil
 }
 
 func NewLBBackEndFromBackendModel(base *models.BackendAddress) (*LBBackEnd, error) {
@@ -372,7 +390,12 @@ func (a *L3n4Addr) IsIPv6() bool {
 // KVStore.
 type L3n4AddrID struct {
 	L3n4Addr
-	ID ServiceID
+	ID    ServiceID
+	Slave uint16 // Number of slaves associated with this L3n4AddrID
+}
+
+func (a *L3n4AddrID) String() string {
+	return fmt.Sprintf("id: %d, L3n4Addr: %s, slave: %d ", a.ID, a.L3n4Addr.String(), a.Slave)
 }
 
 // NewL3n4AddrID creates a new L3n4AddrID.
@@ -404,7 +427,8 @@ func (l *L3n4AddrID) IsIPv6() bool {
 // beIndex and the new 'be' will be inserted on index beIndex-1 of that new array. All
 // remaining be elements will be kept on the same index and, in case the new array is
 // larger than the number of backends, some elements will be empty.
-func (svcs SVCMap) AddFEnBE(fe *L3n4AddrID, be *LBBackEnd, beIndex int) {
+func (svcs SVCMap) AddFEnBE(fe *L3n4AddrID, be *LBBackEnd, beIndex int) *LBSVC {
+	log.Debugf("adding frontend %s and backend %s with backend index %d to SVCMap", fe, be, beIndex)
 	sha := fe.SHA256Sum()
 
 	var lbsvc LBSVC
@@ -438,5 +462,7 @@ func (svcs SVCMap) AddFEnBE(fe *L3n4AddrID, be *LBBackEnd, beIndex int) {
 		}
 	}
 
+	lbsvc.Sha256 = sha
 	svcs[sha] = lbsvc
+	return &lbsvc
 }
