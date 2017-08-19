@@ -86,6 +86,7 @@ var (
 	v4ServicePrefix       string
 	v6ServicePrefix       string
 	tunnelMode            string
+	device                string
 )
 
 var logOpts = make(map[string]string)
@@ -250,7 +251,7 @@ func init() {
 		"ipv4-cluster-cidr-mask-size", 8, "Mask size for the cluster wide CIDR")
 	flags.BoolP(
 		"debug", "D", false, "Enable debugging mode")
-	flags.StringVarP(&config.Device,
+	flags.StringVarP(&device,
 		"device", "d", "undefined", "Device facing cluster/external network for direct L3 (non-overlay mode)")
 	flags.BoolVar(&disableConntrack,
 		"disable-conntrack", false, "Disable connection tracking")
@@ -496,8 +497,8 @@ func initEnv() {
 
 	// If device has been specified, use it to derive better default
 	// allocation prefixes
-	if config.Device != "undefined" {
-		nodeaddress.InitDefaultPrefix(config.Device)
+	if device != "undefined" {
+		nodeaddress.InitDefaultPrefix(device)
 	}
 
 	if v6Address != "auto" {
