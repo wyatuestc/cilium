@@ -247,7 +247,7 @@ static inline int __inline__ __lb6_rev_nat(struct __sk_buff *skb, int l4_off,
 	__be32 sum;
 	int ret;
 
-	cilium_trace_lb(skb, DBG_LB6_REVERSE_NAT, nat->address.p4, nat->port);
+	cilium_trace(skb, DBG_LB6_REVERSE_NAT, nat->address.p4, nat->port);
 
 	if (nat->port) {
 		ret = reverse_map_l4_port(skb, tuple->nexthdr, nat->port, l4_off, csum_off);
@@ -336,14 +336,15 @@ static inline int __inline__ lb6_extract_key(struct __sk_buff *skb, struct ipv6_
 static inline struct lb6_service *lb6_lookup_service(struct __sk_buff *skb,
 						    struct lb6_key *key)
 {
+#if defined LB_L3 || defined LB_L4
+	struct lb6_service *svc = NULL;
+#endif
+
 #ifdef LB_L4
 	if (key->dport) {
-		struct lb6_service *svc;
-
-		cilium_trace_lb(skb, DBG_LB6_LOOKUP_MASTER, key->address.p4, key->dport);
 		svc = map_lookup_elem(&cilium_lb6_services, key);
 		if (svc && svc->count != 0)
-			return svc;
+			goto found;
 
 		key->dport = 0;
 	}
@@ -351,17 +352,21 @@ static inline struct lb6_service *lb6_lookup_service(struct __sk_buff *skb,
 
 #ifdef LB_L3
 	if (1) {
-		struct lb6_service *svc;
-
 		cilium_trace_lb(skb, DBG_LB6_LOOKUP_MASTER, key->address.p4, key->dport);
 		svc = map_lookup_elem(&cilium_lb6_services, key);
 		if (svc && svc->count != 0)
-			return svc;
+			goto found;
 	}
 #endif
 
 	cilium_trace_lb(skb, DBG_LB6_LOOKUP_MASTER_FAIL, key->address.p2, key->address.p3);
 	return NULL;
+
+#if defined LB_L3 || defined LB_L4
+found:
+	cilium_trace3(skb, DBG_LB6_MASTER_HIT, key->address.p4, key->dport, svc->count);
+	return svc;
+#endif
 }
 
 static inline struct lb6_service *lb6_lookup_slave(struct __sk_buff *skb,
@@ -552,15 +557,15 @@ static inline int __inline__ lb4_extract_key(struct __sk_buff *skb, struct ipv4_
 static inline struct lb4_service *lb4_lookup_service(struct __sk_buff *skb,
 						     struct lb4_key *key)
 {
+#if defined LB_L3 || defined LB_L4
+	struct lb4_service *svc = NULL;
+#endif
+
 #ifdef LB_L4
 	if (key->dport) {
-		struct lb4_service *svc;
-
-		/* FIXME: The verifier barks on these calls right now for some reason */
-		/* cilium_trace_lb(skb, DBG_LB4_LOOKUP_MASTER, key->address, key->dport); */
 		svc = map_lookup_elem(&cilium_lb4_services, key);
 		if (svc && svc->count != 0)
-			return svc;
+			goto found;
 
 		key->dport = 0;
 	}
@@ -568,19 +573,23 @@ static inline struct lb4_service *lb4_lookup_service(struct __sk_buff *skb,
 
 #ifdef LB_L3
 	if (1) {
-		struct lb4_service *svc;
-
 		/* FIXME: The verifier barks on these calls right now for some reason */
 		/* cilium_trace_lb(skb, DBG_LB4_LOOKUP_MASTER, key->address, key->dport); */
 		svc = map_lookup_elem(&cilium_lb4_services, key);
 		if (svc && svc->count != 0)
-			return svc;
+			goto found;
 	}
 #endif
 #ifndef QUIET_LB
 	cilium_trace_lb(skb, DBG_LB4_LOOKUP_MASTER_FAIL, 0, 0);
 #endif
 	return NULL;
+
+#if defined LB_L3 || defined LB_L4
+found:
+	cilium_trace3(skb, DBG_LB4_MASTER_HIT, key->address, key->dport, svc->count);
+	return svc;
+#endif
 }
 
 static inline struct lb4_service *lb4_lookup_slave(struct __sk_buff *skb,

@@ -89,6 +89,16 @@ enum {
 				 * arg3: unused
 				 */
 	DBG_ABORT_ERR,
+
+	DBG_LB4_MASTER_HIT,	/* arg1: service ip
+				 * arg2: service port
+				 * arg3: number of backends found
+				 */
+
+	DBG_LB6_MASTER_HIT,	/* arg1: service ip (last 4 bytes)
+				 * arg2: service port
+				 * arg3: number of backends found
+				 */
 };
 
 /* Capture types */

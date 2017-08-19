@@ -96,6 +96,8 @@ const (
 	DbgCTLookup62
 	DbgCTCreated6
 	DbgErrAbort
+	DbgLB4MasterHit
+	DbgLB6MasterHit
 )
 
 // must be in sync with <bpf/lib/conntrack.h>
@@ -324,6 +326,12 @@ func (n *DebugMsg) Dump(data []byte, prefix string) {
 		fmt.Printf("Conntrack create: %s\n", ctCreate6Info(n))
 	case DbgErrAbort:
 		fmt.Printf("Aborted processing on error %d\n", int32(n.Arg1))
+	case DbgLB6MasterHit:
+		fmt.Printf("Successful service lookup for [::%s]:%d, %d backends found\n",
+			ip6Str(n.Arg1), byteorder.NetworkToHost(uint16(n.Arg2)), n.Arg3)
+	case DbgLB4MasterHit:
+		fmt.Printf("Successful service lookup for %s:%d, %d backends found\n",
+			ip4Str(n.Arg1), byteorder.NetworkToHost(uint16(n.Arg2)), n.Arg3)
 	default:
 		fmt.Printf("Unknown message type=%d arg1=%d arg2=%d\n", n.SubType, n.Arg1, n.Arg2)
 	}
