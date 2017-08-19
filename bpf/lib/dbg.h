@@ -113,6 +113,18 @@ enum {
 	DBG_CAPTURE_AFTER_V64,
 	DBG_CAPTURE_PROXY_PRE,
 	DBG_CAPTURE_PROXY_POST,
+	DBG_CAPTURE_NAT,	/* packet going into SNAT box
+				 * arg1: ingress ifindex of SNAT box
+				 */
+	DBG_CAPTURE_NAT_REV,	/* packet going into reverse SNAT box
+				 * arg1: ingress ifindex of reverse SNAT box
+				 */
+	DBG_CAPTURE_NAT_REV_OUT, /* bpf_nat_rev_out.c
+				  * arg1: revnat index stored in skb->mark
+				  */
+	DBG_CAPTURE_FROM_NAT,	 /* bpf_netdev.c (when compiled with FROM_NAT)
+				  * arg1: ingress ifindex of where the bpf_netdev is attached to
+				  */
 };
 
 #ifndef EVENT_SOURCE

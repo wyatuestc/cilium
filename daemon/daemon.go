@@ -330,6 +330,7 @@ func (d *Daemon) writeNetdevHeader(dir string) error {
 func runProg(prog string, args []string, quiet bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), ExecTimeout)
 	defer cancel()
+	log.Debugf("%s %v", prog, args)
 	out, err := exec.CommandContext(ctx, prog, args...).CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		log.Errorf("Command execution failed: Timeout for %s %s", prog, args)
@@ -400,27 +401,146 @@ func reserveLocalRoutes(ipam *ipam.IPAMConfig) {
 }
 
 const (
-	ciliumChain = "CILIUM_POST"
+	ciliumPostNatChain    = "CILIUM_POST"
+	ciliumPreRawChain     = "CILIUM_PRE_RAW"
+	ciliumPreMangleChain  = "CILIUM_PRE_MANGLE"
+	ciliumPostMangleChain = "CILIUM_POST_MANGLE"
 )
 
-func (d *Daemon) removeMasqRule() {
-	runProg("iptables", []string{
-		"-t", "nat",
-		"-D", "POSTROUTING",
-		"-j", ciliumChain}, true)
-	runProg("iptables", []string{
-		"-t", "nat",
-		"-F", ciliumChain}, true)
-	runProg("iptables", []string{
-		"-t", "nat",
-		"-X", ciliumChain}, true)
+type customChain struct {
+	name       string
+	table      string
+	hook       string
+	feederArgs []string
 }
 
-func (d *Daemon) installMasqRule() error {
-	// Add cilium POSTROUTING chain
+func getFeedRule(name, args string) []string {
+	ruleTail := []string{"-m", "comment", "--comment", "cilium " + name, "-j", name}
+	if args == "" {
+		return ruleTail
+	}
+	return append(strings.Split(args, " "), ruleTail...)
+}
+
+func (c *customChain) add() error {
+	return runProg("iptables", []string{"-t", c.table, "-N", c.name}, false)
+}
+
+func (c *customChain) remove() {
+	for _, feedArgs := range c.feederArgs {
+		runProg("iptables", append([]string{
+			"-t", c.table,
+			"-D", c.hook}, getFeedRule(c.name, feedArgs)...), true)
+	}
+	runProg("iptables", []string{
+		"-t", c.table,
+		"-F", c.name}, true)
+	runProg("iptables", []string{
+		"-t", c.table,
+		"-X", c.name}, true)
+}
+
+func (c *customChain) installFeeder() error {
+	for _, feedArgs := range c.feederArgs {
+		err := runProg("iptables", append([]string{"-t", c.table, "-A", c.hook}, getFeedRule(c.name, feedArgs)...), true)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ciliumChains is the list of custom iptables chain used by Cilium. Custom
+// chains are used to allow for simple replacements of all rules.
+//
+// WARNING: If you change or remove any of the feeder rules you have to ensure
+// that the old feeder rules is also removed on agent start, otherwise,
+// flushing and removing the custom chains will fail.
+var ciliumChains = []customChain{
+	{
+		name:       ciliumPostNatChain,
+		table:      "nat",
+		hook:       "POSTROUTING",
+		feederArgs: []string{""},
+	},
+	{
+		name:  ciliumPreRawChain,
+		table: "raw",
+		hook:  "PREROUTING",
+		feederArgs: []string{
+			"-i cilium-nat-out2",
+			"-m mark --mark 0xA5B80000/0xFFFF0000",
+		},
+	},
+	{
+		name:       ciliumPreMangleChain,
+		table:      "mangle",
+		hook:       "PREROUTING",
+		feederArgs: []string{"-m mark --mark 0xA5B80000/0xFFFF0000"},
+	},
+	{
+		name:       ciliumPostMangleChain,
+		table:      "mangle",
+		hook:       "POSTROUTING",
+		feederArgs: []string{""},
+	},
+}
+
+func removeIPtablesRules() {
+	for _, c := range ciliumChains {
+		c.remove()
+	}
+}
+
+func (d *Daemon) installIPtablesRules() error {
+	for _, c := range ciliumChains {
+		if err := c.add(); err != nil {
+			return fmt.Errorf("cannot add custom chain %s: %s", c.name, err)
+		}
+	}
+
+	// FIXME: remove (log)
+	if err := runProg("iptables", []string{
+		"-t", "raw",
+		"-A", ciliumPreRawChain,
+		"-j", "LOG"}, false); err != nil {
+		return err
+	}
+
+	// make mark part of the conntrack tuple
+	if err := runProg("iptables", []string{
+		"-t", "raw",
+		"-A", ciliumPreRawChain,
+		"-j", "CT", "--zone-orig", "mark"}, false); err != nil {
+		return err
+	}
+
+	// SNAT everything that passes through the NAT box in forward direction
 	if err := runProg("iptables", []string{
 		"-t", "nat",
-		"-N", ciliumChain}, false); err != nil {
+		"-A", ciliumPostNatChain,
+		"-o", "cilium-nat-out2",
+		"-m", "comment", "--comment", "cilium SNAT",
+		"-j", "SNAT", "--to-source", nodeaddress.GetExternalIPv4().String()}, false); err != nil {
+		return err
+	}
+
+	// save mark in conntrack as we pass through NAT box in forward direction
+	if err := runProg("iptables", []string{
+		"-t", "mangle",
+		"-A", ciliumPreMangleChain,
+		"-m", "conntrack", "--ctdir", "ORIGINAL",
+		"-j", "CONNMARK", "--save-mark"}, false); err != nil {
+		return err
+	}
+
+	// restore mark from conntrack as we pass through NAT box in reverse direction
+	if err := runProg("iptables", []string{
+		"-t", "mangle",
+		"-A", ciliumPostMangleChain,
+		"-o", "cilium-nat-in",
+		"-m", "conntrack", "--ctdir", "REPLY",
+		"-j", "CONNMARK", "--restore-mark"}, false); err != nil {
 		return err
 	}
 
@@ -430,7 +550,7 @@ func (d *Daemon) installMasqRule() error {
 		//  - with a destination outside of the cluster prefix
 		if err := runProg("iptables", []string{
 			"-t", "nat",
-			"-A", ciliumChain,
+			"-A", ciliumPostNatChain,
 			"-s", nodeaddress.GetIPv4AllocRange().String(),
 			"!", "-d", nodeaddress.GetIPv4ClusterRange().String(),
 			"-m", "comment", "--comment", "cilium endpoint->world masquerade",
@@ -444,7 +564,7 @@ func (d *Daemon) installMasqRule() error {
 		//  - going to an interface other than the tunnel interface
 		if err := runProg("iptables", []string{
 			"-t", "nat",
-			"-A", ciliumChain,
+			"-A", ciliumPostNatChain,
 			"-s", nodeaddress.GetIPv4AllocRange().String(),
 			"!", "-d", nodeaddress.GetIPv4AllocRange().String(),
 			"!", "-o", "cilium_" + tunnelMode,
@@ -458,7 +578,7 @@ func (d *Daemon) installMasqRule() error {
 	// if the source is not the internal IP
 	if err := runProg("iptables", []string{
 		"-t", "nat",
-		"-A", ciliumChain,
+		"-A", ciliumPostNatChain,
 		"!", "-s", nodeaddress.GetInternalIPv4().String(),
 		"-o", "cilium_host",
 		"-m", "addrtype", "--src-type", "LOCAL",
@@ -467,11 +587,13 @@ func (d *Daemon) installMasqRule() error {
 		return err
 	}
 
-	// Hook POSTROUTING into Cilium POSTROUTING chain
-	return runProg("iptables", []string{
-		"-t", "nat",
-		"-A", "POSTROUTING",
-		"-j", ciliumChain}, false)
+	for _, c := range ciliumChains {
+		if err := c.installFeeder(); err != nil {
+			return fmt.Errorf("cannot install feeder rule %s: %s", c.feederArgs, err)
+		}
+	}
+
+	return nil
 }
 
 func (d *Daemon) compileBase() error {
@@ -535,10 +657,10 @@ func (d *Daemon) compileBase() error {
 	reserveLocalRoutes(d.ipamConf)
 
 	// Always remove masquerade rule and then re-add it if required
-	d.removeMasqRule()
+	removeIPtablesRules()
 	if masquerade {
-		if err := d.installMasqRule(); err != nil {
-			return err
+		if err := d.installIPtablesRules(); err != nil {
+			return fmt.Errorf("Unable to install iptales rules: %s", err)
 		}
 	}
 

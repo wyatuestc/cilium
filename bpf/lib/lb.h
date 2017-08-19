@@ -283,18 +283,18 @@ static inline int __inline__ __lb6_rev_nat(struct __sk_buff *skb, int l4_off,
  * @arg l4_off		offset to L4
  * @arg csum_off	offset to L4 checksum field
  * @arg csum_flags	checksum flags
- * @arg index		reverse NAT index
+ * @arg revnat		reverse NAT index
  * @arg tuple		tuple
  * @arg saddr_tuple	If set, tuple address will be updated with new source address
  */
 static inline int __inline__ lb6_rev_nat(struct __sk_buff *skb, int l4_off,
-					 struct csum_offset *csum_off, __u16 index,
+					 struct csum_offset *csum_off, __u16 revnat,
 					 struct ipv6_ct_tuple *tuple, int flags)
 {
 	struct lb6_reverse_nat *nat;
 
-	cilium_trace_lb(skb, DBG_LB6_REVERSE_NAT_LOOKUP, index, 0);
-	nat = map_lookup_elem(&cilium_lb6_reverse_nat, &index);
+	cilium_trace_lb(skb, DBG_LB6_REVERSE_NAT_LOOKUP, revnat, 0);
+	nat = map_lookup_elem(&cilium_lb6_reverse_nat, &revnat);
 	if (nat == NULL)
 		return 0;
 
@@ -438,8 +438,7 @@ static inline int __inline__ lb6_local(struct __sk_buff *skb, int l3_off, int l4
 static inline int __inline__ __lb4_rev_nat(struct __sk_buff *skb, int l3_off, int l4_off,
 					 struct csum_offset *csum_off,
 					 struct ipv4_ct_tuple *tuple, int flags,
-					 struct lb4_reverse_nat *nat,
-					 struct ct_state *ct_state)
+					 struct lb4_reverse_nat *nat, int loopback)
 {
 	__be32 old_sip, new_sip, sum = 0;
 	int ret;
@@ -463,7 +462,7 @@ static inline int __inline__ __lb4_rev_nat(struct __sk_buff *skb, int l3_off, in
 		new_sip = nat->address;
 	}
 
-	if (ct_state->loopback) {
+	if (loopback) {
 		/* The packet was looped back to the sending endpoint on the
 		 * forward service translation. This implies that the original
 		 * source address of the packet is the source address of the
@@ -502,30 +501,30 @@ static inline int __inline__ __lb4_rev_nat(struct __sk_buff *skb, int l3_off, in
 	return 0;
 }
 
-
 /** Perform IPv4 reverse NAT based on reverse NAT index
  * @arg skb		packet
  * @arg l3_off		offset to L3
  * @arg l4_off		offset to L4
  * @arg csum_off	offset to L4 checksum field
- * @arg csum_flags	checksum flags
- * @arg index		reverse NAT index
- * @arg tuple		tuple
+ * @arg loopback	must be set to true if forward translation was via loopback
+ * @arg tuple		5-tuple of connection
+ * @arg revnat		reverse NAT index
+ * @arg flags		flags
  */
 static inline int __inline__ lb4_rev_nat(struct __sk_buff *skb, int l3_off, int l4_off,
-					 struct csum_offset *csum_off,
-					 struct ct_state *ct_state,
-					 struct ipv4_ct_tuple *tuple, int flags)
+					 struct csum_offset *csum_off, int loopback,
+					 struct ipv4_ct_tuple *tuple,
+					 __u16 revnat, int flags)
 {
 	struct lb4_reverse_nat *nat;
+	__u16 index = revnat;
 
-	cilium_trace_lb(skb, DBG_LB4_REVERSE_NAT_LOOKUP, ct_state->rev_nat_index, 0);
-	nat = map_lookup_elem(&cilium_lb4_reverse_nat, &ct_state->rev_nat_index);
+	cilium_trace_lb(skb, DBG_LB4_REVERSE_NAT_LOOKUP, index, 0);
+	nat = map_lookup_elem(&cilium_lb4_reverse_nat, &index);
 	if (nat == NULL)
 		return 0;
 
-	return __lb4_rev_nat(skb, l3_off, l4_off, csum_off, tuple, flags, nat,
-			     ct_state);
+	return __lb4_rev_nat(skb, l3_off, l4_off, csum_off, tuple, flags, nat, loopback);
 }
 
 /** Extract IPv4 LB key from packet

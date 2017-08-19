@@ -112,8 +112,8 @@ static inline int __inline__ ipv4_revnat(struct __sk_buff *skb)
 
 	ret = ct_lookup4(&CT_MAP4, &tuple, skb, l4_off, CT_EGRESS, &ct_state);
 	if (unlikely(ret == CT_REPLY && ct_state.rev_nat_index)) {
-		lb4_rev_nat(skb, ETH_HLEN, l4_off, &csum_off, &ct_state, &tuple,
-			    REV_NAT_F_TUPLE_SADDR);
+		lb4_rev_nat(skb, ETH_HLEN, l4_off, &csum_off, ct_state.loopback,
+			    &tuple, ct_state.rev_nat_index, REV_NAT_F_TUPLE_SADDR);
 	}
 
 	return ret;

@@ -47,6 +47,7 @@
 #include "lib/encap.h"
 #include "lib/proxy.h"
 #include "lib/lxc.h"
+#include "lib/nat.h"
 
 #define POLICY_ID ((LXC_ID << 16) | SECLABEL)
 
@@ -185,6 +186,16 @@ skip_service_lookup:
 	case CT_RELATED:
 	case CT_REPLY:
 		policy_mark_skip(skb);
+
+		/* If the packet went through the SNAT box on the way in, then
+		 * it must go through the SNAT box in the reverse path as well.
+		 * This must happen before any reverse DNAT is performed as the
+		 * DNAT did happen before the SNAT on the way in. The conntrack
+		 * entry off the SNAT will contain the revnat index for the
+		 * reverse DNAT and will be performed in bpf_nat_rev_out.
+		 */
+		if (ct_state.snat)
+			return redirect_nat_reverse(skb, (__u8 *) &router_mac.addr, SECLABEL);
 
 		if (ct_state.rev_nat_index) {
 			ret = lb6_rev_nat(skb, l4_off, &csum_off,
@@ -463,9 +474,20 @@ skip_service_lookup:
 	case CT_REPLY:
 		policy_mark_skip(skb);
 
+		/* If the packet went through the SNAT box on the way in, then
+		 * it must go through the SNAT box in the reverse path as well.
+		 * This must happen before any reverse DNAT is performed as the
+		 * DNAT did happen before the SNAT on the way in. The conntrack
+		 * entry off the SNAT will contain the revnat index for the
+		 * reverse DNAT and will be performed in bpf_nat_rev_out.
+		 */
+		if (ct_state.snat)
+			return redirect_nat_reverse(skb, (__u8 *) &router_mac.addr, SECLABEL);
+
 		if (ct_state.rev_nat_index) {
 			ret = lb4_rev_nat(skb, l3_off, l4_off, &csum_off,
-					  &ct_state, &tuple, 0);
+					  ct_state.loopback, &tuple,
+					  ct_state.rev_nat_index, 0);
 			if (IS_ERR(ret))
 				return ret;
 		}
@@ -675,7 +697,8 @@ struct bpf_elf_map __section_maps POLICY_MAP = {
 	.max_elem	= 1024,
 };
 
-static inline int __inline__ ipv6_policy(struct __sk_buff *skb, int ifindex, __u32 src_label)
+static inline int __inline__ ipv6_policy(struct __sk_buff *skb, int ifindex, __u32 src_label,
+					 __u32 ct_flags)
 {
 	void *data = (void *) (long) skb->data;
 	void *data_end = (void *) (long) skb->data_end;
@@ -756,6 +779,7 @@ static inline int __inline__ ipv6_policy(struct __sk_buff *skb, int ifindex, __u
 
 		ct_state_new.orig_dport = tuple.dport;
 		ct_state_new.src_sec_id = src_label;
+		ct_state_new.snat = (ct_flags & CB_CT_SNAT);
 		ret = ct_create6(&CT_MAP6, &tuple, skb, CT_INGRESS, &ct_state_new,
 				 orig_was_proxy);
 		if (IS_ERR(ret))
@@ -787,7 +811,8 @@ static inline int __inline__ ipv6_policy(struct __sk_buff *skb, int ifindex, __u
 }
 
 #ifdef LXC_IPV4
-static inline int __inline__ ipv4_policy(struct __sk_buff *skb, int ifindex, __u32 src_label)
+static inline int __inline__ ipv4_policy(struct __sk_buff *skb, int ifindex, __u32 src_label,
+					 __u32 ct_flags)
 {
 	void *data = (void *) (long) skb->data;
 	void *data_end = (void *) (long) skb->data_end;
@@ -827,8 +852,8 @@ static inline int __inline__ ipv4_policy(struct __sk_buff *skb, int ifindex, __u
 		int ret2;
 
 		ret2 = lb4_rev_nat(skb, ETH_HLEN, l4_off, &csum_off,
-				   &ct_state, &tuple,
-				   REV_NAT_F_TUPLE_SADDR);
+				   ct_state.loopback, &tuple,
+				   ct_state.rev_nat_index, REV_NAT_F_TUPLE_SADDR);
 		if (IS_ERR(ret2))
 			return ret2;
 
@@ -854,6 +879,7 @@ static inline int __inline__ ipv4_policy(struct __sk_buff *skb, int ifindex, __u
 
 		ct_state_new.orig_dport = tuple.dport;
 		ct_state_new.src_sec_id = src_label;
+		ct_state_new.snat = (ct_flags & CB_CT_SNAT);
 		ret = ct_create4(&CT_MAP4, &tuple, skb, CT_INGRESS, &ct_state_new,
 				 orig_was_proxy);
 		if (IS_ERR(ret))
@@ -893,15 +919,16 @@ __section_tail(CILIUM_MAP_POLICY, LXC_ID) int handle_policy(struct __sk_buff *sk
 {
 	int ret, ifindex = skb->cb[CB_IFINDEX];
 	__u32 src_label = skb->cb[CB_SRC_LABEL];
+	__u32 ct_flags = skb->cb[CB_CT_FLAGS];
 
 	switch (skb->protocol) {
 	case bpf_htons(ETH_P_IPV6):
-		ret = ipv6_policy(skb, ifindex, src_label);
+		ret = ipv6_policy(skb, ifindex, src_label, ct_flags);
 		break;
 
 #ifdef LXC_IPV4
 	case bpf_htons(ETH_P_IP):
-		ret = ipv4_policy(skb, ifindex, src_label);
+		ret = ipv4_policy(skb, ifindex, src_label, ct_flags);
 		break;
 #endif
 
