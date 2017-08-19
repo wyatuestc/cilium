@@ -44,6 +44,12 @@ type KVClient interface {
 	GetWatcher(key string, timeSleep time.Duration) <-chan []policy.NumericIdentity
 
 	Status() (string, error)
+
+	// StartWatch starts watching for changes in a prefix
+	StartWatch(w *Watcher)
+
+	// ListPrefix returns a list of keys matching the prefix
+	ListPrefix(prefix string) (KeyValuePairs, error)
 }
 
 type KVLocker interface {
@@ -53,4 +59,12 @@ type KVLocker interface {
 // GetLockPath returns the lock path representation of the given path.
 func GetLockPath(path string) string {
 	return path + ".lock"
+}
+
+// KeyValuePairs is a map of key=value pairs
+type KeyValuePairs map[string][]byte
+
+// ListPrefix returns the list of keys matching the prefix
+func ListPrefix(prefix string) (KeyValuePairs, error) {
+	return Client.ListPrefix(prefix)
 }
