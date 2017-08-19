@@ -88,6 +88,7 @@ enum {
 				 * arg2: src sec-id
 				 * arg3: unused
 				 */
+	DBG_ABORT_ERR,
 };
 
 /* Capture types */
