@@ -16,6 +16,8 @@ package k8s
 
 import (
 	"fmt"
+	"reflect"
+	"time"
 
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/policy/api"
@@ -38,6 +40,45 @@ type CiliumNetworkPolicy struct {
 
 	// Specs is a list of desired Cilium specific rule specification.
 	Specs api.Rules `json:"specs,omitempty"`
+
+	// Status is the status of the Cilium policy rule
+	Status CiliumNetworkPolicyStatus `json:"status"`
+}
+
+// CiliumNetworkPolicyStatus is the status of a Cilium policy rule
+type CiliumNetworkPolicyStatus struct {
+	// Nodes is the Cilium policy status for each node
+	Nodes map[string]CiliumNetworkPolicyNodeStatus
+}
+
+// CiliumNetworkPolicyNodeStatus is the status of a Cilium policy rule for a
+// specific node
+type CiliumNetworkPolicyNodeStatus struct {
+	// OK is true when the policy has been installed successfully
+	OK bool
+
+	// Message describes the error condition if OK is false
+	Message string
+
+	// LastSeen contains the last time this status was updated
+	LastSeen time.Time
+}
+
+// SetPolicyStatus sets the given policy status for the given nodes' map
+func (r *CiliumNetworkPolicy) SetPolicyStatus(nodeName string, cnpns CiliumNetworkPolicyNodeStatus) {
+	if r.Status.Nodes == nil {
+		r.Status.Nodes = map[string]CiliumNetworkPolicyNodeStatus{}
+	}
+	r.Status.Nodes[nodeName] = cnpns
+}
+
+// SpecEquals returns true if the spec and specs metadata is the sa
+func (r *CiliumNetworkPolicy) SpecEquals(o *CiliumNetworkPolicy) bool {
+	if o == nil {
+		return r == nil
+	}
+	return reflect.DeepEqual(r.Spec, o.Spec) &&
+		reflect.DeepEqual(r.Specs, o.Specs)
 }
 
 // GetObjectKind returns the kind of the object

@@ -27,6 +27,7 @@ import (
 	"github.com/cilium/cilium/pkg/k8s"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/node"
+	"github.com/cilium/cilium/pkg/nodeaddress"
 
 	log "github.com/Sirupsen/logrus"
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
@@ -932,10 +933,44 @@ func (d *Daemon) addCiliumNetworkPolicy(obj interface{}) {
 		}
 	}
 
+	var cnpns k8s.CiliumNetworkPolicyNodeStatus
 	if err != nil {
-		log.Warningf("Unable to add CiliumNetworkPolicy %s: %s", rule.Metadata.Name, err)
+		cnpns = k8s.CiliumNetworkPolicyNodeStatus{
+			OK:       false,
+			Message:  fmt.Sprintf("%s", err),
+			LastSeen: time.Now(),
+		}
+		log.Warningf("Unable to add CiliumNetworkPolicy %s: err: '%s'. err != nil: '%t'. a nil object: '%s'", rule.Metadata.Name, err, err != nil, nil)
 	} else {
+		cnpns = k8s.CiliumNetworkPolicyNodeStatus{
+			OK:       true,
+			Message:  "OK",
+			LastSeen: time.Now(),
+		}
 		log.Infof("Imported CiliumNetworkPolicy %s", rule.Metadata.Name)
+	}
+
+	rule.SetPolicyStatus(nodeaddress.GetName(), cnpns)
+
+	rule, err = crdClient.Update(rule)
+	if err != nil {
+		ns := k8s.ExtractNamespace(&rule.Metadata)
+		log.Warningf("k8s: unable to update CNP %s/%s with status: %s, retrying...", ns, rule.Metadata.Name, err)
+		go func(rule *k8s.CiliumNetworkPolicy) {
+			for n := 0; err != nil; {
+				log.Warningf("k8s: unable to update CNP %s/%s with status: %s, retrying...", ns, rule.Metadata.Name, err)
+
+				rule.SetPolicyStatus(nodeaddress.GetName(), cnpns)
+
+				rule, err = crdClient.Update(rule)
+				if n < 10 {
+					n++
+				} else {
+					log.Errorf("k8s: unable to update CNP %s/%s with status: %s", ns, rule.Metadata.Name, err)
+				}
+				time.Sleep(time.Duration(n) * time.Second)
+			}
+		}(rule)
 	}
 }
 
@@ -963,6 +998,22 @@ func (d *Daemon) deleteCiliumNetworkPolicy(obj interface{}) {
 }
 
 func (d *Daemon) updateCiliumNetworkPolicy(oldObj interface{}, newObj interface{}) {
+	oldRule, ok := oldObj.(*k8s.CiliumNetworkPolicy)
+	if !ok {
+		log.Warningf("Received unknown object %+v, expected a CiliumNetworkPolicy object", oldObj)
+		return
+	}
+	newRules, ok := newObj.(*k8s.CiliumNetworkPolicy)
+	if !ok {
+		log.Warningf("Received unknown object %+v, expected a CiliumNetworkPolicy object", newObj)
+		return
+	}
+	// Since we are updating the status map from all nodes we need to prevent
+	// deletion and addition of all rules in cilium.
+	if oldRule.SpecEquals(newRules) {
+		return
+	}
+
 	// FIXME
 	d.deleteCiliumNetworkPolicy(oldObj)
 	d.addCiliumNetworkPolicy(newObj)
